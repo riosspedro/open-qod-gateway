@@ -2,10 +2,18 @@ import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Form,
+    Header,
+    Request,
+    Response,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -18,6 +26,12 @@ from app.models import (
     UpdateSessionRequest,
 )
 from app.nef_client import NefClient, NefClientError
+from app.oauth import (
+    InsufficientScopeError,
+    InvalidClientError,
+    InvalidTokenError,
+    OAuthTokenService,
+)
 from app.profiles import UnknownQosProfileError
 from app.service import (
     SessionNotFoundError,
@@ -47,6 +61,8 @@ def create_app(
         settings=resolved_settings,
         client_factory=client_factory,
     )
+
+    oauth_service = OAuthTokenService(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -98,6 +114,94 @@ def create_app(
         SessionService,
         Depends(get_service),
     ]
+
+    def require_scope(required_scope: str):
+        def verify_authorization(
+            authorization: Annotated[
+                str | None,
+                Header(),
+            ] = None,
+        ) -> dict[str, Any]:
+            if authorization is None:
+                raise InvalidTokenError(
+                    "Cabeçalho Authorization ausente."
+                )
+
+            scheme, separator, token = authorization.partition(" ")
+
+            if (
+                separator != " "
+                or scheme.lower() != "bearer"
+                or not token.strip()
+            ):
+                raise InvalidTokenError(
+                    "Use Authorization: Bearer <token>."
+                )
+
+            return oauth_service.verify_token(
+                token.strip(),
+                required_scope=required_scope,
+            )
+
+        return verify_authorization
+
+    ReadAuthorization = Annotated[
+        dict[str, Any],
+        Depends(require_scope("qod:read")),
+    ]
+
+    WriteAuthorization = Annotated[
+        dict[str, Any],
+        Depends(require_scope("qod:write")),
+    ]
+
+    @app.exception_handler(InsufficientScopeError)
+    async def handle_insufficient_scope(
+        request: Request,
+        exc: InsufficientScopeError,
+    ) -> JSONResponse:
+        body = ApiError(
+            status=403,
+            code="PERMISSION_DENIED",
+            message=str(exc),
+        )
+
+        return JSONResponse(
+            status_code=403,
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer error="insufficient_scope"'
+                ),
+            },
+            content=body.model_dump(
+                by_alias=True,
+                mode="json",
+            ),
+        )
+
+    @app.exception_handler(InvalidTokenError)
+    async def handle_invalid_token(
+        request: Request,
+        exc: InvalidTokenError,
+    ) -> JSONResponse:
+        body = ApiError(
+            status=401,
+            code="UNAUTHENTICATED",
+            message=str(exc),
+        )
+
+        return JSONResponse(
+            status_code=401,
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer error="invalid_token"'
+                ),
+            },
+            content=body.model_dump(
+                by_alias=True,
+                mode="json",
+            ),
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
@@ -209,6 +313,59 @@ def create_app(
             ),
         )
 
+    @app.post("/oauth2/token")
+    async def issue_access_token(
+        grant_type: str = Form(...),
+        client_id: str = Form(...),
+        client_secret: str = Form(...),
+        scope: str = Form(
+            default="qod:read qod:write"
+        ),
+    ) -> JSONResponse:
+        if grant_type != "client_credentials":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "unsupported_grant_type",
+                    "error_description": (
+                        "Somente grant_type=client_credentials "
+                        "é suportado."
+                    ),
+                },
+            )
+
+        try:
+            token = oauth_service.issue_token(
+                client_id=client_id,
+                client_secret=client_secret,
+                scope=scope,
+            )
+        except InvalidClientError as exc:
+            return JSONResponse(
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": "Basic",
+                },
+                content={
+                    "error": "invalid_client",
+                    "error_description": str(exc),
+                },
+            )
+
+        return JSONResponse(
+            status_code=200,
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
+            content={
+                "access_token": token.access_token,
+                "token_type": token.token_type,
+                "expires_in": token.expires_in,
+                "scope": token.scope,
+            },
+        )
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {
@@ -223,6 +380,7 @@ def create_app(
     async def create_session(
         payload: CreateSessionRequest,
         session_service: ServiceDependency,
+        authorization: WriteAuthorization,
     ) -> SessionInfo:
         return await session_service.create_session(payload)
 
@@ -233,6 +391,7 @@ def create_app(
     async def get_session(
         session_id: UUID,
         session_service: ServiceDependency,
+        authorization: ReadAuthorization,
     ) -> SessionInfo:
         return session_service.get_session(session_id)
 
@@ -244,6 +403,7 @@ def create_app(
         session_id: UUID,
         payload: UpdateSessionRequest,
         session_service: ServiceDependency,
+        authorization: WriteAuthorization,
     ) -> SessionInfo:
         return await session_service.update_session(
             session_id,
@@ -257,6 +417,7 @@ def create_app(
     async def delete_session(
         session_id: UUID,
         session_service: ServiceDependency,
+        authorization: WriteAuthorization,
     ) -> Response:
         await session_service.delete_session(session_id)
 

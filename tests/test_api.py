@@ -82,7 +82,33 @@ def make_settings(tmp_path: Path) -> Settings:
         nef_client_secret="secret",
         nef_notification_destination="http://callback",
         database_path=str(tmp_path / "gateway.db"),
+        gateway_oauth_client_id="test-client",
+        gateway_oauth_client_secret="test-secret",
+        gateway_oauth_signing_secret="test-signing-secret",
     )
+
+
+def authorization_headers(
+    client: TestClient,
+    scope: str = "qod:read qod:write",
+) -> dict[str, str]:
+    response = client.post(
+        "/oauth2/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "scope": scope,
+        },
+    )
+
+    assert response.status_code == 200
+
+    return {
+        "Authorization": (
+            f"Bearer {response.json()['access_token']}"
+        )
+    }
 
 
 def test_health_endpoint(tmp_path) -> None:
@@ -109,9 +135,12 @@ def test_create_get_and_delete_session(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         create_response = client.post(
             "/sessions",
             json=VALID_PAYLOAD,
+            headers=headers,
         )
 
         assert create_response.status_code == 201
@@ -134,14 +163,16 @@ def test_create_get_and_delete_session(tmp_path) -> None:
         session_id = created["sessionId"]
 
         get_response = client.get(
-            f"/sessions/{session_id}"
+            f"/sessions/{session_id}",
+            headers=headers,
         )
 
         assert get_response.status_code == 200
         assert get_response.json() == created
 
         delete_response = client.delete(
-            f"/sessions/{session_id}"
+            f"/sessions/{session_id}",
+            headers=headers,
         )
 
         assert delete_response.status_code == 204
@@ -149,7 +180,8 @@ def test_create_get_and_delete_session(tmp_path) -> None:
         assert fake.deleted_subscription_id == "42"
 
         missing_response = client.get(
-            f"/sessions/{session_id}"
+            f"/sessions/{session_id}",
+            headers=headers,
         )
 
         assert missing_response.status_code == 404
@@ -174,9 +206,12 @@ def test_unknown_qos_profile_returns_400(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         response = client.post(
             "/sessions",
             json=payload,
+            headers=headers,
         )
 
     assert response.status_code == 400
@@ -193,9 +228,12 @@ def test_invalid_request_returns_400(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         response = client.post(
             "/sessions",
             json=payload,
+            headers=headers,
         )
 
     assert response.status_code == 400
@@ -210,8 +248,11 @@ def test_unknown_session_returns_404(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         response = client.get(
-            f"/sessions/{uuid4()}"
+            f"/sessions/{uuid4()}",
+            headers=headers,
         )
 
     assert response.status_code == 404

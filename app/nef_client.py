@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import ssl
 from typing import Any
 
 import httpx
@@ -8,6 +9,44 @@ from app.config import Settings
 
 class NefClientError(RuntimeError):
     pass
+
+
+def build_nef_ssl_context(
+    settings: Settings,
+) -> bool | ssl.SSLContext:
+    client_certificate = settings.nef_client_cert
+    client_key = settings.nef_client_key
+
+    if (
+        not settings.nef_verify_tls
+        and client_certificate is None
+    ):
+        return False
+
+    try:
+        context = ssl.create_default_context(
+            cafile=(
+                settings.nef_ca_bundle
+                if settings.nef_verify_tls
+                else None
+            )
+        )
+
+        if not settings.nef_verify_tls:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        if client_certificate is not None and client_key is not None:
+            context.load_cert_chain(
+                certfile=client_certificate,
+                keyfile=client_key,
+            )
+    except (OSError, ssl.SSLError) as exc:
+        raise NefClientError(
+            f"Falha ao configurar TLS do cliente NEF: {exc}"
+        ) from exc
+
+    return context
 
 
 @dataclass(frozen=True)
@@ -22,7 +61,7 @@ class NefClient:
         self.settings = settings
         self.http = httpx.AsyncClient(
             base_url=settings.nef_base_url.rstrip("/"),
-            verify=settings.nef_verify_tls,
+            verify=build_nef_ssl_context(settings),
             timeout=settings.nef_timeout_seconds,
         )
 

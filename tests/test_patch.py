@@ -109,7 +109,32 @@ def make_settings(tmp_path: Path) -> Settings:
         nef_client_secret="secret",
         nef_notification_destination="http://callback",
         database_path=str(tmp_path / "gateway.db"),
+        gateway_oauth_client_id="test-client",
+        gateway_oauth_client_secret="test-secret",
+        gateway_oauth_signing_secret="test-signing-secret",
     )
+
+
+def authorization_headers(
+    client: TestClient,
+) -> dict[str, str]:
+    response = client.post(
+        "/oauth2/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "scope": "qod:read qod:write",
+        },
+    )
+
+    assert response.status_code == 200
+
+    return {
+        "Authorization": (
+            f"Bearer {response.json()['access_token']}"
+        )
+    }
 
 
 def test_empty_patch_is_rejected() -> None:
@@ -126,9 +151,12 @@ def test_patch_updates_profile_and_duration(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         created = client.post(
             "/sessions",
             json=CREATE_PAYLOAD,
+            headers=headers,
         )
 
         assert created.status_code == 201
@@ -141,6 +169,7 @@ def test_patch_updates_profile_and_duration(tmp_path) -> None:
                 "qosProfile": "QOS_HIGH",
                 "duration": 600,
             },
+            headers=headers,
         )
 
         assert patched.status_code == 200
@@ -168,9 +197,12 @@ def test_patch_unknown_profile_returns_400(tmp_path) -> None:
     )
 
     with TestClient(app) as client:
+        headers = authorization_headers(client)
+
         created = client.post(
             "/sessions",
             json=CREATE_PAYLOAD,
+            headers=headers,
         )
 
         session_id = created.json()["sessionId"]
@@ -180,6 +212,7 @@ def test_patch_unknown_profile_returns_400(tmp_path) -> None:
             json={
                 "qosProfile": "QOS_INVALID",
             },
+            headers=headers,
         )
 
     assert patched.status_code == 400
