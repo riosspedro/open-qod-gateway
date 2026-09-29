@@ -6,3 +6,4 @@ __pycache__/
 data/*.db
 *.log
 .env.backup.*
+open-qod-gateway.pid
